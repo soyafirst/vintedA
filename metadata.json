@@ -1,0 +1,6 @@
+{
+  "name": "OmniTool - Vinted Reselling Pro",
+  "description": "Suite 100% dédiée à l'Achat/Revente Vinted : Anomaly Hunter multi-catalogues, Vérif Authentique Legit Check IA et Snipe du Mois Top Liquidité.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

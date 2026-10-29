@@ -101,7 +101,7 @@ export const BargainHunter: React.FC = () => {
     setStatusType('info');
 
     try {
-      const res = await fetch('/api/vinted/bargains', {
+      let res = await fetch('/api/vinted/bargains', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -112,6 +112,20 @@ export const BargainHunter: React.FC = () => {
           catalogName: 'Recherche Invendus & Bonnes Affaires',
         }),
       });
+
+      if (res.status === 404) {
+        res = await fetch('/.netlify/functions/bargains', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            catalogUrl: catalogUrl.trim(),
+            maxPrice,
+            minDaysUnsold,
+            activeSellerOnly,
+            catalogName: 'Recherche Invendus & Bonnes Affaires',
+          }),
+        });
+      }
 
       const data = await res.json();
 

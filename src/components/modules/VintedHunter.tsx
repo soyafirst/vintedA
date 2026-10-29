@@ -288,7 +288,7 @@ export const VintedHunter: React.FC = () => {
     }
 
     try {
-      await fetch('/api/discord/send-webhook', {
+      let dRes = await fetch('/api/discord/send-webhook', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -296,6 +296,16 @@ export const VintedHunter: React.FC = () => {
           alert,
         }),
       });
+      if (dRes.status === 404) {
+        await fetch('/.netlify/functions/send-webhook', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            webhookUrl: webhook.trim(),
+            alert,
+          }),
+        });
+      }
     } catch (err) {
       console.warn('Discord send error:', err);
     }
@@ -323,7 +333,7 @@ export const VintedHunter: React.FC = () => {
     setActiveCatalogScanning(currentCatalogName);
 
     try {
-      const res = await fetch('/api/vinted/scan', {
+      let res = await fetch('/api/vinted/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -332,6 +342,19 @@ export const VintedHunter: React.FC = () => {
           catalogId: currentCatalogId,
         }),
       });
+
+      // Fallback for Netlify if rewrites not resolved
+      if (res.status === 404) {
+        res = await fetch('/.netlify/functions/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            catalogUrl: currentCatalogUrl,
+            catalogName: currentCatalogName,
+            catalogId: currentCatalogId,
+          }),
+        });
+      }
 
       if (res.ok) {
         const data = await res.json();

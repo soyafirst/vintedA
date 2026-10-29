@@ -1,0 +1,39 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/vinted/scan"
+  to = "/.netlify/functions/scan"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/vinted/bargains"
+  to = "/.netlify/functions/bargains"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/discord/send-webhook"
+  to = "/.netlify/functions/send-webhook"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/vinted/sync-config"
+  to = "/.netlify/functions/sync-config"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

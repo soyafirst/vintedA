@@ -1,0 +1,6 @@
+/api/vinted/scan /.netlify/functions/scan 200!
+/api/vinted/bargains /.netlify/functions/bargains 200!
+/api/discord/send-webhook /.netlify/functions/send-webhook 200!
+/api/vinted/sync-config /.netlify/functions/sync-config 200!
+/api/* /.netlify/functions/:splat 200!
+/* /index.html 200

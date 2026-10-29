@@ -1,4 +1,23 @@
-export type AppModule = 'hunter' | 'legit_check' | 'trends';
+export type AppModule = 'hunter' | 'bargains' | 'legit_check' | 'trends';
+
+export interface BargainItem {
+  id: string;
+  title: string;
+  brand: string;
+  condition: string;
+  size: string;
+  sellerPrice: number;
+  offerPrice40: number; // -40% aggressive discount
+  marketPrice: number;
+  estimatedNetProfit: number;
+  daysUnsold: number;
+  sellerActiveRecently: boolean;
+  sellerName: string;
+  imageUrl?: string;
+  itemUrl: string;
+  negotiationScript: string;
+  catalogName?: string;
+}
 
 export interface VintedAlert {
   id: string;

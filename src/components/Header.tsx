@@ -1,5 +1,5 @@
 import React from 'react';
-import { Menu, Zap, ShieldCheck, TrendingUp, Settings, Moon } from 'lucide-react';
+import { Menu, Zap, ShieldCheck, TrendingUp, Settings, Moon, Tag } from 'lucide-react';
 import { AppModule } from '../types';
 import { sounds } from '../utils/audio';
 
@@ -15,6 +15,11 @@ const MODULE_NAMES: Record<AppModule, { title: string; subtitle: string; icon: R
     title: 'Anomaly Hunter',
     subtitle: 'Radar Live & Multi-Catalogues',
     icon: Zap,
+  },
+  bargains: {
+    title: 'Invendus & Bonnes Affaires',
+    subtitle: 'Deep Search Vinted & Négociation -40%',
+    icon: Tag,
   },
   legit_check: {
     title: 'Vérif Authentique',
@@ -83,6 +88,17 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <Zap className="w-3.5 h-3.5" />
           <span>Anomaly Hunter</span>
+        </button>
+        <button
+          onClick={() => handleTabChange('bargains')}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer ${
+            activeModule === 'bargains'
+              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-xs'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Tag className="w-3.5 h-3.5" />
+          <span>Invendus & Affaires</span>
         </button>
         <button
           onClick={() => handleTabChange('legit_check')}

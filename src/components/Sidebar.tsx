@@ -5,7 +5,7 @@ import {
   TrendingUp, 
   ChevronRight,
   Shield,
-  Command,
+  Tag,
   Settings
 } from 'lucide-react';
 import { AppModule } from '../types';
@@ -36,6 +36,14 @@ const NAV_ITEMS: NavItem[] = [
     icon: Zap,
     accentColor: 'text-amber-400 group-hover:text-amber-300',
     badge: 'LIVE',
+  },
+  {
+    id: 'bargains',
+    label: 'Invendus & Affaires',
+    tagline: 'Deep Search & Négociation -40%',
+    icon: Tag,
+    accentColor: 'text-emerald-400 group-hover:text-emerald-300',
+    badge: 'DEEP',
   },
   {
     id: 'legit_check',
@@ -127,6 +135,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         isActive
                           ? item.id === 'hunter'
                             ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                            : item.id === 'bargains'
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                             : item.id === 'legit_check'
                             ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
                             : 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
@@ -143,6 +153,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             className={`text-[9px] font-mono font-medium px-1.5 py-0.2 rounded ${
                               item.badge === 'LIVE'
                                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                : item.badge === 'DEEP'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                                 : item.badge === 'IA'
                                 ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
                                 : 'bg-purple-500/20 text-purple-300 border border-purple-500/30'

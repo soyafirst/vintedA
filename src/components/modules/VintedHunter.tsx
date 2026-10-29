@@ -187,14 +187,22 @@ export const VintedHunter: React.FC = () => {
   const [serverStatusMessage, setServerStatusMessage] = useState<string>('Initialisation du flux multi-catalogues...');
   const [isConnected, setIsConnected] = useState<boolean>(false);
 
-  // Persist catalogs to localStorage
+  // Persist catalogs to localStorage & sync to autonomous background server worker
   useEffect(() => {
     try {
       localStorage.setItem(CATALOGS_STORAGE_KEY, JSON.stringify(catalogs));
+      fetch('/api/vinted/sync-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          catalogs,
+          discordWebhookUrl: discordWebhookUrl.trim(),
+        }),
+      }).catch(() => {});
     } catch {
       // storage error
     }
-  }, [catalogs]);
+  }, [catalogs, discordWebhookUrl]);
 
   // Persist filters to localStorage
   useEffect(() => {

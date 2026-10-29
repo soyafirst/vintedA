@@ -1,5 +1,5 @@
-// Vercel Serverless Function: POST /api/vinted/scan
-// STRICT REAL VINTED SCANNER - ZERO MOCK DATA - 100% REAL VINTED ITEMS & CANONICAL URLS
+// Vercel Serverless Function: POST & GET /api/vinted/scan
+// 100% AUTONOMOUS SERVERLESS SCANNER (CRON COMPATIBLE & ZERO MOCK DATA)
 import type { IncomingMessage, ServerResponse } from 'http';
 
 interface VercelRequest extends IncomingMessage {
@@ -35,14 +35,23 @@ interface ParsedVintedItem {
 
 // Global in-memory cache for warm serverless instances
 const seenItems = new Map<string, SeenItem>();
+const sentDiscordItemIds = new Set<string>();
 let totalAnalyzedCount = 0;
 let totalAnomaliesCount = 0;
 
-// Vinted session cookie cache
 let cachedVintedCookie = '';
 let cookieTimestamp = 0;
 
-// Authentic Reference prices for reselling cotes
+// Default catalogs to scan autonomously during Cron execution
+const DEFAULT_CRON_CATALOGS = [
+  { name: 'Catalogue Général Nouveautés', url: 'https://www.vinted.fr/catalog?order=newest_first' },
+  { name: 'Carhartt & Workwear', url: 'https://www.vinted.fr/catalog?search_text=carhartt&order=newest_first&price_to=35' },
+  { name: 'Ralph Lauren & Tommy', url: 'https://www.vinted.fr/catalog?search_text=ralph+lauren&order=newest_first&price_to=30' },
+  { name: 'The North Face & Arc’teryx', url: 'https://www.vinted.fr/catalog?search_text=north+face+arcteryx&order=newest_first&price_to=60' }
+];
+
+let cronRotationIndex = 0;
+
 const REFERENCE_PRICES: Record<string, number> = {
   'doudoune': 65,
   'the north face': 75,
@@ -146,7 +155,7 @@ async function getVintedSessionCookie(): Promise<string> {
       }
     }
   } catch {
-    // Continue with direct request if cookie prefetch fails
+    // continue
   }
 
   return '';
@@ -215,6 +224,45 @@ function parseItemsFromHtml(html: string): ParsedVintedItem[] {
   return items;
 }
 
+// Autonomous dispatch to Discord
+async function dispatchToDiscord(webhookUrl: string, alert: any) {
+  if (!webhookUrl || !webhookUrl.startsWith('https://discord.com/api/webhooks/')) return;
+  const strId = String(alert.id);
+  if (sentDiscordItemIds.has(strId)) return;
+  sentDiscordItemIds.add(strId);
+
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: 'Vinted 24/7 Autonomous Scanner',
+        avatar_url: 'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=128&q=80',
+        embeds: [
+          {
+            title: `🟢 Deal Vinted Détecté : ${alert.title}`,
+            url: alert.itemUrl,
+            color: 0x10b981,
+            description: `**Opportunité sous la cote : -${alert.discountPercentage}% !**\n\n🎯 **Catalogue :** \`${alert.catalogName}\`\n\n${alert.anomalyReason}`,
+            fields: [
+              { name: '💰 Prix Vendeur', value: `**${alert.sellerPrice} €**`, inline: true },
+              { name: '📈 Cote Marché', value: `**${alert.marketPrice} €**`, inline: true },
+              { name: '💥 Économie', value: `**-${alert.discountPercentage}%**`, inline: true },
+              { name: '🏷️ Marque / Taille', value: `${alert.brand} · ${alert.size}`, inline: true },
+              { name: '🛒 Lien Direct', value: `[Acheter l'article](${alert.itemUrl})`, inline: true },
+            ],
+            thumbnail: alert.imageUrl ? { url: alert.imageUrl } : undefined,
+            footer: { text: `Vinted Pro Suite · Scan Autonome H24` },
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+  } catch (err) {
+    console.warn('Autonomous discord dispatch error:', err);
+  }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -222,10 +270,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
-  }
-
-  if (req.method !== 'POST' && req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
@@ -240,9 +284,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bodyData = req.body;
     }
 
-    const rawCatalogUrl = (bodyData?.catalogUrl || req.query?.catalogUrl) as string | undefined;
-    const catalogName = (bodyData?.catalogName || req.query?.catalogName) as string | undefined;
+    // Determine target catalog (handles both Cron GET requests and browser POST requests)
+    let rawCatalogUrl = (bodyData?.catalogUrl || req.query?.catalogUrl) as string | undefined;
+    let catalogName = (bodyData?.catalogName || req.query?.catalogName) as string | undefined;
     const catalogId = (bodyData?.catalogId || req.query?.catalogId) as string | undefined;
+    const discordWebhookUrl = (bodyData?.discordWebhookUrl || req.query?.discordWebhookUrl || process.env.DISCORD_WEBHOOK_URL) as string | undefined;
+
+    // If triggered by Cron (GET without catalog specified), cycle through default catalog presets
+    if (!rawCatalogUrl && !catalogName) {
+      const activePreset = DEFAULT_CRON_CATALOGS[cronRotationIndex % DEFAULT_CRON_CATALOGS.length];
+      cronRotationIndex = (cronRotationIndex + 1) % DEFAULT_CRON_CATALOGS.length;
+      rawCatalogUrl = activePreset.url;
+      catalogName = activePreset.name;
+    }
 
     const activeCatalogLabel = catalogName && catalogName.trim() ? catalogName.trim() : 'Catalogue Général';
     const targetCatalogUrl = normalizeCatalogUrl(rawCatalogUrl);
@@ -322,7 +376,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const item of rawItems) {
       const { marketPrice, matchedKeyword } = getMarketEstimate(item.title, item.brand);
 
-      // ONLY flag items with verified reference Cote
       if (!marketPrice || !matchedKeyword) {
         continue;
       }
@@ -350,7 +403,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       const discountPercentage = Math.round(((marketPrice - item.price) / marketPrice) * 100);
 
-      // Threshold: at least 55% discount OR price drop
       if (discountPercentage >= 55 || (isPriceDrop && discountPercentage >= 50)) {
         const canonicalUrl = `https://www.vinted.fr/items/${item.id}`;
         const alertType = isPriceDrop ? 'price_drop' : 'manual';
@@ -359,7 +411,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           ? `Baisse de prix détectée : passé de ${previousPrice}€ à ${item.price}€ (-${discountPercentage}% sous la cote ${matchedKeyword}).`
           : `Opportunité détectée : -${discountPercentage}% sous la cote de référence (${marketPrice}€ pour ${matchedKeyword}).`;
 
-        detectedAnomalies.push({
+        const alertItem = {
           id: item.id,
           title: item.title,
           brand: item.brand,
@@ -382,13 +434,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           anomalyReason,
           catalogName: activeCatalogLabel,
           catalogId: catalogId || 'default',
-        });
+        };
+
+        detectedAnomalies.push(alertItem);
         totalAnomaliesCount++;
+
+        // Autonomously send to Discord if configured
+        if (discordWebhookUrl) {
+          dispatchToDiscord(discordWebhookUrl, alertItem);
+        }
       }
     }
 
     return res.status(200).json({
       success: true,
+      mode: req.method === 'GET' ? 'cron_autonomous' : 'realtime_scan',
       analyzedBatchCount: batchAnalyzed,
       totalAnalyzed: totalAnalyzedCount,
       totalAnomalies: totalAnomaliesCount,

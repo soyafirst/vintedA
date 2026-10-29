@@ -8,6 +8,7 @@ import { AppModule } from './types';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { VintedHunter } from './components/modules/VintedHunter';
+import { BargainHunter } from './components/modules/BargainHunter';
 import { LegitCheck } from './components/modules/LegitCheck';
 import { SnipeTrends } from './components/modules/SnipeTrends';
 import { DiscordSettingsModal } from './components/DiscordSettingsModal';
@@ -43,6 +44,12 @@ export default function App() {
           {activeModule === 'hunter' && (
             <section className="animate-fade-in" aria-label="Anomaly Hunter">
               <VintedHunter />
+            </section>
+          )}
+
+          {activeModule === 'bargains' && (
+            <section className="animate-fade-in" aria-label="Invendus & Bonnes Affaires">
+              <BargainHunter />
             </section>
           )}
 

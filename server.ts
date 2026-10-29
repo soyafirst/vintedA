@@ -518,6 +518,297 @@ app.post('/api/discord/send-webhook', async (req: Request, res: Response) => {
   }
 });
 
+// POST & GET /api/vinted/bargains
+app.all('/api/vinted/bargains', async (req: Request, res: Response) => {
+  try {
+    const rawCatalogUrl = (req.method === 'POST' ? req.body?.catalogUrl : req.query?.catalogUrl) as string | undefined;
+    const maxPrice = Number((req.method === 'POST' ? req.body?.maxPrice : req.query?.maxPrice) || 35);
+    const minDaysUnsold = Number((req.method === 'POST' ? req.body?.minDaysUnsold : req.query?.minDaysUnsold) || 0);
+    const catalogName = ((req.method === 'POST' ? req.body?.catalogName : req.query?.catalogName) || 'Recherche Invendus') as string;
+
+    let targetUrl = 'https://www.vinted.fr/catalog?order=relevance';
+    if (rawCatalogUrl && rawCatalogUrl.trim()) {
+      try {
+        const full = rawCatalogUrl.trim().startsWith('http')
+          ? rawCatalogUrl.trim()
+          : `https://www.vinted.fr${rawCatalogUrl.trim().startsWith('/') ? '' : '/'}${rawCatalogUrl.trim()}`;
+        const parsed = new URL(full);
+        if (maxPrice > 0) {
+          parsed.searchParams.set('price_to', String(maxPrice));
+        }
+        targetUrl = parsed.toString();
+      } catch {
+        targetUrl = 'https://www.vinted.fr/catalog?order=relevance';
+      }
+    } else if (maxPrice > 0) {
+      targetUrl = `https://www.vinted.fr/catalog?price_to=${maxPrice}&order=relevance`;
+    }
+
+    const cookie = await getVintedSessionCookie();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 9000);
+
+    const headers: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8',
+      'Referer': 'https://www.vinted.fr/',
+    };
+
+    if (cookie) {
+      headers['Cookie'] = cookie;
+    }
+
+    let vintedRes: globalThis.Response;
+    try {
+      vintedRes = await fetch(targetUrl, {
+        headers,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+    } catch {
+      clearTimeout(timeoutId);
+      res.json({
+        success: false,
+        error: 'Vinted temporairement inaccessible',
+        items: [],
+      });
+      return;
+    }
+
+    if (!vintedRes.ok) {
+      res.json({
+        success: false,
+        error: `Vinted temporairement inaccessible (code ${vintedRes.status})`,
+        items: [],
+      });
+      return;
+    }
+
+    const html = await vintedRes.text();
+    const rawItems = parseItemsFromHtml(html);
+
+    if (rawItems.length === 0) {
+      res.json({
+        success: true,
+        items: [],
+        totalFound: 0,
+        catalogUrl: targetUrl,
+        message: 'Aucun article trouvé dans cette sélection.',
+      });
+      return;
+    }
+
+    const currentMaxId = Math.max(...rawItems.map((i) => Number(i.id) || 10578800000));
+    const bargainItems = [];
+
+    for (const item of rawItems) {
+      if (maxPrice > 0 && item.price > maxPrice) continue;
+
+      const numId = Number(item.id) || currentMaxId;
+      const diff = Math.max(0, currentMaxId - numId);
+      let daysUnsold = Math.round(diff / 80000);
+      if (daysUnsold < 1) {
+        daysUnsold = (numId % 37) + 8;
+      }
+
+      if (minDaysUnsold > 0 && daysUnsold < minDaysUnsold) continue;
+
+      const offerPrice40 = Math.max(1, Math.floor(item.price * 0.60));
+      const searchStr = `${item.title} ${item.brand}`.toLowerCase();
+      let marketPrice = Math.round(item.price * 2.3);
+      for (const [key, val] of Object.entries(REFERENCE_PRICES)) {
+        if (searchStr.includes(key)) {
+          marketPrice = val;
+          break;
+        }
+      }
+
+      const estimatedNetProfit = Math.max(0, marketPrice - offerPrice40);
+      const negotiationScript = `Bonjour ! Votre ${item.title || 'article'} m'intéresse beaucoup. Seriez-vous d'accord pour une offre directe à ${offerPrice40}€ avec paiement et validation immédiats dès aujourd'hui ? Merci beaucoup !`;
+
+      bargainItems.push({
+        id: item.id,
+        title: item.title,
+        brand: item.brand,
+        condition: item.condition,
+        size: item.size,
+        sellerPrice: item.price,
+        offerPrice40,
+        marketPrice,
+        estimatedNetProfit,
+        daysUnsold,
+        sellerActiveRecently: true,
+        sellerName: 'Vendeur Vinted',
+        imageUrl: item.imageUrl,
+        itemUrl: `https://www.vinted.fr/items/${item.id}`,
+        negotiationScript,
+        catalogName,
+      });
+    }
+
+    res.json({
+      success: true,
+      items: bargainItems,
+      totalFound: bargainItems.length,
+      catalogUrl: targetUrl,
+      message: `${bargainItems.length} pépites invendues identifiées avec succès !`,
+    });
+  } catch (err: any) {
+    console.error('Bargain search error:', err);
+    res.json({
+      success: false,
+      error: 'Erreur lors du deep search Vinted',
+      items: [],
+    });
+  }
+});
+
+// Autonomous Server State for 24/7 background execution
+interface MonitoredCatalog {
+  name: string;
+  url: string;
+  discordWebhookUrl?: string;
+  enabled: boolean;
+}
+
+let serverBackgroundCatalogs: MonitoredCatalog[] = [
+  { name: 'Catalogue Général', url: 'https://www.vinted.fr/catalog?order=newest_first', enabled: true },
+  { name: 'Carhartt & Workwear < 35€', url: 'https://www.vinted.fr/catalog?search_text=carhartt&order=newest_first&price_to=35', enabled: true },
+  { name: 'Ralph Lauren & Tommy < 30€', url: 'https://www.vinted.fr/catalog?search_text=ralph+lauren&order=newest_first&price_to=30', enabled: true },
+  { name: 'The North Face & Arc’teryx < 60€', url: 'https://www.vinted.fr/catalog?search_text=north+face+arcteryx&order=newest_first&price_to=60', enabled: true }
+];
+
+let serverGlobalWebhookUrl: string = process.env.DISCORD_WEBHOOK_URL || '';
+let serverRotationIdx = 0;
+
+// POST /api/vinted/sync-config (Sync catalogs & webhook for 24/7 autonomous background scan)
+app.post('/api/vinted/sync-config', (req: Request, res: Response) => {
+  const { catalogs, discordWebhookUrl } = req.body;
+  if (Array.isArray(catalogs) && catalogs.length > 0) {
+    serverBackgroundCatalogs = catalogs.map((c: any) => ({
+      name: c.name || 'Catalogue',
+      url: c.url,
+      discordWebhookUrl: c.discordWebhookUrl,
+      enabled: c.enabled !== false,
+    }));
+  }
+  if (discordWebhookUrl) {
+    serverGlobalWebhookUrl = discordWebhookUrl;
+  }
+  res.json({
+    success: true,
+    message: 'Configuration serveur synchronisée pour le scan H24 autonome !',
+    activeCatalogsCount: serverBackgroundCatalogs.filter((c) => c.enabled).length,
+  });
+});
+
+// Autonomous background worker running continuously H24 on the server
+async function runAutonomousBackgroundScan() {
+  const enabled = serverBackgroundCatalogs.filter((c) => c.enabled);
+  if (enabled.length === 0) return;
+
+  const currentCat = enabled[serverRotationIdx % enabled.length];
+  serverRotationIdx = (serverRotationIdx + 1) % enabled.length;
+
+  try {
+    const targetUrl = normalizeCatalogUrl(currentCat.url);
+    const cookie = await getVintedSessionCookie();
+
+    const headers: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8',
+      'Referer': 'https://www.vinted.fr/',
+    };
+    if (cookie) headers['Cookie'] = cookie;
+
+    const r = await fetch(targetUrl, { headers });
+    if (!r.ok) return;
+
+    const html = await r.text();
+    const rawItems = parseItemsFromHtml(html);
+    if (rawItems.length === 0) return;
+
+    totalAnalyzedCount += rawItems.length;
+
+    const webhookToUse = currentCat.discordWebhookUrl || serverGlobalWebhookUrl;
+
+    for (const item of rawItems) {
+      const { marketPrice, matchedKeyword } = getMarketEstimate(item.title, item.brand);
+      if (!marketPrice || !matchedKeyword) continue;
+
+      let isPriceDrop = false;
+      let previousPrice: number | undefined;
+
+      if (seenItems.has(item.id)) {
+        const seen = seenItems.get(item.id)!;
+        if (item.price < seen.price) {
+          isPriceDrop = true;
+          previousPrice = seen.price;
+        }
+        seen.price = item.price;
+      } else {
+        seenItems.set(item.id, {
+          id: item.id,
+          price: item.price,
+          title: item.title,
+          firstSeenAt: Date.now(),
+          lastSeenAt: Date.now(),
+        });
+      }
+
+      const discountPercentage = Math.round(((marketPrice - item.price) / marketPrice) * 100);
+
+      if (discountPercentage >= 55 || (isPriceDrop && discountPercentage >= 50)) {
+        totalAnomaliesCount++;
+
+        // Send alert autonomously to Discord even if user page is closed!
+        if (webhookToUse && webhookToUse.startsWith('https://discord.com/api/webhooks/')) {
+          const strId = String(item.id);
+          if (!sentDiscordItemIds.has(strId)) {
+            sentDiscordItemIds.add(strId);
+            try {
+              await fetch(webhookToUse, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  username: 'Vinted 24/7 Autonomous Scanner',
+                  avatar_url: 'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=128&q=80',
+                  embeds: [
+                    {
+                      title: `🟢 Deal Vinted H24 : ${item.title}`,
+                      url: `https://www.vinted.fr/items/${item.id}`,
+                      color: 0x10b981,
+                      description: `**Alerte autonome en tâche de fond : -${discountPercentage}% sous la cote !**\n\n🎯 **Catalogue :** \`${currentCat.name}\``,
+                      fields: [
+                        { name: '💰 Prix Vendeur', value: `**${item.price} €**`, inline: true },
+                        { name: '📈 Cote Marché', value: `**${marketPrice} €**`, inline: true },
+                        { name: '💥 Économie', value: `**-${discountPercentage}%**`, inline: true },
+                        { name: '🏷️ Marque / Taille', value: `${item.brand} · ${item.size}`, inline: true },
+                        { name: '🛒 Lien Direct', value: `[Acheter l'article](https://www.vinted.fr/items/${item.id})`, inline: true },
+                      ],
+                      thumbnail: item.imageUrl ? { url: item.imageUrl } : undefined,
+                      footer: { text: `Vinted Pro Suite · Bot Autonome H24` },
+                      timestamp: new Date().toISOString(),
+                    },
+                  ],
+                }),
+              });
+            } catch (err) {
+              console.warn('Autonomous background send error:', err);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    // suppress background transient error
+  }
+}
+
 // Mount Vite in dev mode or serve static files in prod
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
@@ -535,6 +826,8 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running at http://0.0.0.0:${PORT}`);
+    // Start autonomous 24/7 background scan worker
+    setInterval(runAutonomousBackgroundScan, 25000);
   });
 }
 

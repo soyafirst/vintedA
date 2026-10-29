@@ -38,6 +38,7 @@ import { getDiscordConfig, saveDiscordConfig } from '../DiscordSettingsModal';
 
 const DISCORD_STORAGE_KEY = 'omnitool_vinted_discord_webhook_url';
 const DISCORD_ENABLED_KEY = 'omnitool_vinted_discord_enabled';
+const DISCORD_SENT_STORAGE_KEY = 'omnitool_vinted_sent_discord_ids_v1';
 const FILTERS_STORAGE_KEY = 'omnitool_vinted_resell_filters_v1';
 const CATALOGS_STORAGE_KEY = 'omnitool_vinted_catalogs_v1';
 
@@ -149,6 +150,14 @@ export const VintedHunter: React.FC = () => {
   const [catalogTestStatus, setCatalogTestStatus] = useState<Record<string, { status: 'idle' | 'sending' | 'success' | 'error'; message: string }>>({});
   const [activeCatalogScanning, setActiveCatalogScanning] = useState<string>('Catalogue Général');
   const catalogRotationIndexRef = useRef<number>(0);
+  const sentDiscordIdsRef = useRef<Set<string>>((() => {
+    try {
+      const stored = localStorage.getItem(DISCORD_SENT_STORAGE_KEY);
+      return stored ? new Set<string>(JSON.parse(stored)) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  })());
 
   // Discord Webhook configuration
   const [showWebhookModal, setShowWebhookModal] = useState<boolean>(false);
@@ -247,10 +256,28 @@ export const VintedHunter: React.FC = () => {
     return true;
   };
 
-  // Dispatch alert to Discord Webhook via backend proxy
-  const sendToDiscord = async (alert: VintedAlert, urlToUse?: string) => {
+  // Dispatch alert to Discord Webhook via backend proxy with strict deduplication
+  const sendToDiscord = async (alert: VintedAlert, urlToUse?: string, forceManual = false) => {
     const webhook = urlToUse || discordWebhookUrl;
     if (!webhook || !webhook.trim().startsWith('https://discord.com/api/webhooks/')) return;
+
+    const strId = String(alert.id);
+
+    // Strict deduplication: NEVER send the same item twice automatically
+    if (!forceManual) {
+      if (sentDiscordIdsRef.current.has(strId)) {
+        return;
+      }
+      sentDiscordIdsRef.current.add(strId);
+      try {
+        localStorage.setItem(
+          DISCORD_SENT_STORAGE_KEY,
+          JSON.stringify(Array.from(sentDiscordIdsRef.current).slice(-400))
+        );
+      } catch {
+        // storage quota fallback
+      }
+    }
 
     try {
       await fetch('/api/discord/send-webhook', {
@@ -300,6 +327,14 @@ export const VintedHunter: React.FC = () => {
 
       if (res.ok) {
         const data = await res.json();
+
+        // If backend reports Vinted inaccessible, do NOT generate fake items
+        if (data.success === false) {
+          setIsConnected(false);
+          setServerStatusMessage(data.error || 'Vinted temporairement inaccessible');
+          return;
+        }
+
         setAnalyzedCount(data.totalAnalyzed || 0);
         setLastScanTime(new Date());
         setIsConnected(data.isConnected);
@@ -1667,7 +1702,7 @@ export const VintedHunter: React.FC = () => {
                       return (
                         <button
                           onClick={() => {
-                            sendToDiscord(alert, targetHook);
+                            sendToDiscord(alert, targetHook, true);
                             sounds.playSuccess();
                           }}
                           className={`p-2.5 rounded-xl border transition-colors ${

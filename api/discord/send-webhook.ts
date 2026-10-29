@@ -14,6 +14,8 @@ interface VercelResponse extends ServerResponse {
   status: (statusCode: number) => VercelResponse;
 }
 
+const sentDiscordItemIds = new Set<string>();
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -43,6 +45,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!webhookUrl || typeof webhookUrl !== 'string' || !webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
       return res.status(400).json({ error: 'URL de Webhook Discord invalide' });
+    }
+
+    // Deduplication check: NEVER send the same real item twice to Discord
+    if (alert && alert.id && !String(alert.id).startsWith('test_') && !alert.title?.includes('[TEST')) {
+      const strId = String(alert.id);
+      if (sentDiscordItemIds.has(strId)) {
+        return res.status(200).json({ success: true, deduplicated: true, message: 'Article déjà envoyé sur Discord' });
+      }
     }
 
     let payload = customPayload;
@@ -136,6 +146,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!discordRes.ok) {
       const errText = await discordRes.text();
       return res.status(discordRes.status).json({ error: `Discord webhook rejected: ${errText}` });
+    }
+
+    if (alert && alert.id) {
+      sentDiscordItemIds.add(String(alert.id));
     }
 
     return res.status(200).json({ success: true, message: 'Embed Discord envoyé avec succès !' });

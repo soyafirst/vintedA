@@ -21,59 +21,56 @@ interface SeenItem {
 }
 
 const seenItems = new Map<string, SeenItem>();
+const sentDiscordItemIds = new Set<string>();
 let totalAnalyzedCount = 0;
 let totalAnomaliesCount = 0;
 
-// Cached real items buffer per URL to prevent rate-limiting
-interface CacheEntry {
-  items: ParsedVintedItem[];
-  fetchedAt: number;
-}
-const urlCache = new Map<string, CacheEntry>();
-const activeFetchLocks = new Set<string>();
+// Vinted session cookie cache
+let cachedVintedCookie = '';
+let cookieTimestamp = 0;
 
-// Reference prices for key items and brands
+// Authentic Reference prices for reselling cotes
 const REFERENCE_PRICES: Record<string, number> = {
-  'doudoune': 60,
-  'north face': 75,
+  'doudoune': 65,
   'the north face': 75,
-  'nike dunk': 70,
+  'north face': 75,
+  'nuptse': 140,
+  'nike dunk': 75,
   'dunk': 70,
   'jordan': 80,
   'air force': 65,
-  'carhartt': 40,
-  'carhartt wip': 45,
-  'ralph lauren': 35,
+  'carhartt': 45,
+  'carhartt wip': 50,
+  'detroit': 120,
+  'ralph lauren': 40,
   'polo ralph lauren': 40,
   'stussy': 55,
   'stüssy': 55,
-  'salomon': 80,
-  'stone island': 120,
-  'supreme': 65,
-  'arc’teryx': 130,
-  'arcteryx': 130,
-  'arc teryx': 130,
-  'corteiz': 70,
-  'trapstar': 60,
-  'patagonia': 60,
+  'salomon': 85,
+  'xt-6': 110,
+  'stone island': 130,
+  'supreme': 70,
+  'arc’teryx': 140,
+  'arcteryx': 140,
+  'arc teryx': 140,
+  'corteiz': 75,
+  'trapstar': 65,
+  'patagonia': 65,
   'lacoste': 45,
-  'cp company': 90,
-  'bape': 85,
-  'diesel': 50,
-  'moncler': 180,
-  'canada goose': 220,
-  'prada': 160,
-  'gucci': 150,
-  'zara': 20,
-  'robe': 25,
-  'manteau': 45,
-  'veste': 35,
-  'blazer': 40,
-  'jeans': 30,
-  'cuir': 65,
+  'cp company': 95,
+  'bape': 90,
+  'diesel': 55,
+  'moncler': 190,
+  'canada goose': 240,
+  'prada': 170,
+  'gucci': 160,
+  'nike tech': 65,
+  'oakley': 50,
+  'palace': 60,
 };
 
-function getMarketEstimate(title: string, brandTitle: string): { marketPrice: number; matchedKeyword: string } {
+// Returns a cote only if an authentic reference keyword matches
+function getMarketEstimate(title: string, brandTitle: string): { marketPrice: number | null; matchedKeyword: string | null } {
   const searchStr = `${title} ${brandTitle}`.toLowerCase();
 
   for (const [key, price] of Object.entries(REFERENCE_PRICES)) {
@@ -82,20 +79,8 @@ function getMarketEstimate(title: string, brandTitle: string): { marketPrice: nu
     }
   }
 
-  if (searchStr.includes('cuir') || searchStr.includes('leather')) {
-    return { marketPrice: 65, matchedKeyword: 'cuir' };
-  }
-  if (searchStr.includes('sneakers') || searchStr.includes('chaussures') || searchStr.includes('baskets')) {
-    return { marketPrice: 50, matchedKeyword: 'sneakers' };
-  }
-  if (searchStr.includes('sweat') || searchStr.includes('hoodie')) {
-    return { marketPrice: 40, matchedKeyword: 'sweat' };
-  }
-  if (searchStr.includes('manteau') || searchStr.includes('parka')) {
-    return { marketPrice: 45, matchedKeyword: 'manteau' };
-  }
-
-  return { marketPrice: 25, matchedKeyword: 'standard' };
+  // No generic fake fallback cote
+  return { marketPrice: null, matchedKeyword: null };
 }
 
 interface ParsedVintedItem {
@@ -103,155 +88,131 @@ interface ParsedVintedItem {
   title: string;
   brand: string;
   condition: string;
-  size?: string;
+  size: string;
   price: number;
-  imgUrl?: string;
-  sellerName: string;
-  sellerRating: number;
-  sellerReviewsCount: number;
+  imageUrl?: string;
 }
 
-// Convert user catalog search URL to optimized API target with order=newest_first
-function buildCleanCatalogUrl(rawUrl?: string): string {
-  if (!rawUrl || !rawUrl.trim()) {
+function normalizeCatalogUrl(webUrl?: string): string {
+  if (!webUrl || !webUrl.trim()) {
     return 'https://www.vinted.fr/catalog?order=newest_first';
   }
-  let trimmed = rawUrl.trim();
-  if (trimmed.startsWith('/')) {
-    trimmed = `https://www.vinted.fr${trimmed}`;
-  } else if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-    trimmed = `https://${trimmed}`;
-  }
-
   try {
-    const parsed = new URL(trimmed);
-    // Force order=newest_first for real-time monitoring
-    parsed.searchParams.set('order', 'newest_first');
+    const raw = webUrl.trim();
+    const full = raw.startsWith('http') ? raw : `https://www.vinted.fr${raw.startsWith('/') ? '' : '/'}${raw}`;
+    const parsed = new URL(full);
+    if (!parsed.searchParams.has('order')) {
+      parsed.searchParams.set('order', 'newest_first');
+    }
     return parsed.toString();
   } catch {
     return 'https://www.vinted.fr/catalog?order=newest_first';
   }
 }
 
-// Scrape live genuine Vinted items from catalog HTML
-async function fetchRealVintedCatalog(targetUrl: string): Promise<ParsedVintedItem[]> {
+// Obtain live session cookie from Vinted
+async function getVintedSessionCookie(): Promise<string> {
   const now = Date.now();
-  const cached = urlCache.get(targetUrl);
-
-  // Return cached real items if fetched within last 7 seconds
-  if (cached && now - cached.fetchedAt < 7000) {
-    return cached.items;
+  if (cachedVintedCookie && now - cookieTimestamp < 1000 * 60 * 20) {
+    return cachedVintedCookie;
   }
-
-  if (activeFetchLocks.has(targetUrl)) {
-    return cached ? cached.items : [];
-  }
-
-  activeFetchLocks.add(targetUrl);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 9000);
 
   try {
-    const res = await fetch(targetUrl, {
-      signal: controller.signal,
+    const res = await fetch('https://www.vinted.fr/', {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.vinted.fr/',
       },
     });
 
-    clearTimeout(timeoutId);
-
-    if (!res.ok) {
-      throw new Error(`Vinted returned status ${res.status}`);
-    }
-
-    const html = await res.text();
-    const idRegex = /data-testid="product-item-id-(\d+)"/g;
-    const items: ParsedVintedItem[] = [];
-    const seenIds = new Set<string>();
-    let match;
-
-    while ((match = idRegex.exec(html)) !== null) {
-      const id = match[1];
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
-
-      const start = match.index;
-      const chunk = html.substring(start, start + 5000);
-
-      const titleAttr = chunk.match(/title="([^"]+)"/);
-      if (!titleAttr) continue;
-      const fullTitleStr = titleAttr[1];
-
-      // Extract price from "XX.XX €"
-      const priceMatches = [...fullTitleStr.matchAll(/(\d+[\.,]\d{2})\s*€/g)];
-      const price = priceMatches.length > 0 ? parseFloat(priceMatches[0][1].replace(',', '.')) : 0;
-      if (price <= 0) continue;
-
-      const parts = fullTitleStr.split(', État:');
-      let title = parts[0].trim();
-      title = title.replace(/&amp;/g, '&').replace(/&#x27;/g, "'").replace(/&quot;/g, '"');
-
-      const condPart = parts[1] || '';
-      let condition = condPart.split(',')[0]?.trim() || 'Bon état';
-
-      // Extract product image
-      const imgMatch = chunk.match(/<img[^>]*src="([^"]+)"/);
-      const imgUrl = imgMatch ? imgMatch[1].replace(/&amp;/g, '&') : undefined;
-
-      // Extract brand
-      const brandMatch = chunk.match(/data-testid="product-item-id-\d+--description-title">([^<]+)<\/p>/);
-      let brand = brandMatch ? brandMatch[1].trim() : '';
-      if (!brand || brand === title) {
-        brand = title.split(' ')[0] || 'Vinted';
-      }
-
-      // Extract precise size and condition from description-subtitle
-      const subMatch = chunk.match(/data-testid="product-item-id-\d+--description-subtitle">([^<]+)<\/p>/);
-      let size = 'Standard';
-      if (subMatch) {
-        const subText = subMatch[1].trim();
-        if (subText.includes('·')) {
-          const subParts = subText.split('·');
-          size = subParts[0].trim().replace(/^EU\s*/i, '').replace(/,/g, '.');
-          condition = subParts.slice(1).join('·').trim();
-        } else if (subText.toLowerCase().includes('état') || subText.toLowerCase().includes('étiquette')) {
-          condition = subText;
-        } else {
-          size = subText.replace(/^EU\s*/i, '').replace(/,/g, '.');
+    const rawCookies = (res.headers as any).getSetCookie ? (res.headers as any).getSetCookie() : [];
+    if (rawCookies.length > 0) {
+      const cookieMap = new Map<string, string>();
+      for (const c of rawCookies) {
+        const parts = c.split(';')[0].split('=');
+        const name = parts[0].trim();
+        const val = parts.slice(1).join('=').trim();
+        if (val) {
+          cookieMap.set(name, val);
         }
       }
+      if (cookieMap.size > 0) {
+        const cookieStr = Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+        cachedVintedCookie = cookieStr;
+        cookieTimestamp = now;
+        return cookieStr;
+      }
+    }
+  } catch {
+    // Continue if pre-fetch fails
+  }
 
-      // Extract seller username
-      const userMatch = chunk.match(/href="\/member\/(\d+)-([^"?]+)/);
-      const sellerName = userMatch ? userMatch[2] : 'vendeur_' + id.slice(-4);
+  return '';
+}
 
+function parseItemsFromHtml(html: string): ParsedVintedItem[] {
+  const itemMatches = Array.from(html.matchAll(/data-testid="product-item-id-(\d+)"/g));
+  const uniqueIds = Array.from(new Set(itemMatches.map((m) => m[1])));
+
+  const items: ParsedVintedItem[] = [];
+
+  for (const id of uniqueIds) {
+    const start = html.indexOf(`data-testid="product-item-id-${id}"`);
+    if (start === -1) continue;
+    const chunk = html.slice(start, start + 4500);
+
+    const imgMatch = chunk.match(/<img[^>]*src="([^"]+)"[^>]*alt="([^"]+)"/i);
+    const imageUrl = imgMatch ? imgMatch[1] : undefined;
+    const altText = imgMatch ? imgMatch[2] : '';
+
+    let title = '';
+    let brand = '';
+    let condition = 'Bon état';
+    let size = 'Standard';
+    let price = 0;
+
+    if (altText) {
+      const parts = altText.split(', ');
+      title = parts[0] || '';
+      for (const p of parts.slice(1)) {
+        if (p.startsWith('Marque: ')) brand = p.replace('Marque: ', '').trim();
+        else if (p.startsWith('État: ')) condition = p.replace('État: ', '').trim();
+        else if (p.startsWith('Taille: ')) size = p.replace('Taille: ', '').trim();
+        else if (p.includes('€') && price === 0) {
+          const num = parseFloat(p.replace('€', '').trim().replace(',', '.'));
+          if (!isNaN(num)) price = num;
+        }
+      }
+    }
+
+    if (price === 0) {
+      const priceMatch = chunk.match(/(\d+[\,\.]\d+)\s*€/);
+      if (priceMatch) {
+        price = parseFloat(priceMatch[1].replace(',', '.'));
+      }
+    }
+
+    if (!title) {
+      const titleMatch = chunk.match(/data-testid="product-item-id-\d+--description-title">([^<]+)<\/p>/);
+      if (titleMatch) title = titleMatch[1].trim();
+    }
+
+    if (id && price > 0) {
       items.push({
         id,
-        title,
-        brand,
+        title: title || 'Article Vinted',
+        brand: brand || 'Sans marque',
         condition,
         size,
         price,
-        imgUrl,
-        sellerName,
-        sellerRating: 4.8,
-        sellerReviewsCount: 14,
+        imageUrl,
       });
     }
-
-    if (items.length > 0) {
-      urlCache.set(targetUrl, { items, fetchedAt: now });
-    }
-
-    return items;
-  } finally {
-    activeFetchLocks.delete(targetUrl);
   }
+
+  return items;
 }
 
 // GET or POST /api/vinted/scan
@@ -261,36 +222,91 @@ app.all('/api/vinted/scan', async (req: Request, res: Response) => {
     const catalogName = (req.method === 'POST' ? req.body?.catalogName : req.query?.catalogName) as string | undefined;
     const catalogId = (req.method === 'POST' ? req.body?.catalogId : req.query?.catalogId) as string | undefined;
 
-    const targetUrl = buildCleanCatalogUrl(rawCatalogUrl);
     const activeCatalogLabel = catalogName && catalogName.trim() ? catalogName.trim() : 'Catalogue Général';
+    const targetCatalogUrl = normalizeCatalogUrl(rawCatalogUrl);
 
-    const realItems = await fetchRealVintedCatalog(targetUrl);
+    const cookie = await getVintedSessionCookie();
 
-    // STRICT ZERO-MOCK: If no real items retrieved, wait rather than inventing fake IDs
-    if (!realItems || realItems.length === 0) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 9000);
+
+    const headers: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Referer': 'https://www.vinted.fr/',
+    };
+
+    if (cookie) {
+      headers['Cookie'] = cookie;
+    }
+
+    let vintedRes: globalThis.Response;
+    try {
+      vintedRes = await fetch(targetCatalogUrl, {
+        headers,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+    } catch {
+      clearTimeout(timeoutId);
+      res.json({
+        success: false,
+        error: 'Vinted temporairement inaccessible',
+        statusMessage: 'Vinted temporairement inaccessible',
+        detectedAnomalies: [],
+        totalAnalyzed: totalAnalyzedCount,
+        totalAnomalies: totalAnomaliesCount,
+        isConnected: false,
+      });
+      return;
+    }
+
+    if (!vintedRes.ok) {
+      res.json({
+        success: false,
+        error: `Vinted temporairement inaccessible (code ${vintedRes.status})`,
+        statusMessage: `Vinted temporairement inaccessible (code ${vintedRes.status})`,
+        detectedAnomalies: [],
+        totalAnalyzed: totalAnalyzedCount,
+        totalAnomalies: totalAnomaliesCount,
+        isConnected: false,
+      });
+      return;
+    }
+
+    const html = await vintedRes.text();
+    const rawItems = parseItemsFromHtml(html);
+
+    if (rawItems.length === 0) {
       res.json({
         success: true,
         analyzedBatchCount: 0,
         totalAnalyzed: totalAnalyzedCount,
         totalAnomalies: totalAnomaliesCount,
         detectedAnomalies: [],
-        isConnected: false,
+        isConnected: true,
         catalogName: activeCatalogLabel,
-        catalogUrl: targetUrl,
-        statusMessage: `En attente du flux pour "${activeCatalogLabel}"...`,
+        catalogUrl: targetCatalogUrl,
+        statusMessage: `Aucune annonce analysable sur "${activeCatalogLabel}"`,
       });
       return;
     }
 
-    const batchAnalyzed = realItems.length;
+    const batchAnalyzed = rawItems.length;
     totalAnalyzedCount += batchAnalyzed;
 
     const detectedAnomalies: any[] = [];
 
-    for (const item of realItems) {
+    for (const item of rawItems) {
       const { marketPrice, matchedKeyword } = getMarketEstimate(item.title, item.brand);
 
-      // Check for price drop
+      // ONLY process items with a verified reference cote
+      if (!marketPrice || !matchedKeyword) {
+        continue;
+      }
+
       let isPriceDrop = false;
       let previousPrice: number | undefined = undefined;
 
@@ -312,30 +328,18 @@ app.all('/api/vinted/scan', async (req: Request, res: Response) => {
         });
       }
 
-      // Calculate discount percentage
       const discountPercentage = Math.round(((marketPrice - item.price) / marketPrice) * 100);
 
       // Threshold: at least 55% discount OR price drop
       if (discountPercentage >= 55 || (isPriceDrop && discountPercentage >= 50)) {
-        const isCertified = item.sellerReviewsCount > 0;
-
-        let alertType: 'certified' | 'manual' | 'price_drop' = 'manual';
-        if (isPriceDrop) {
-          alertType = 'price_drop';
-        } else if (isCertified) {
-          alertType = 'certified';
-        }
+        const canonicalUrl = `https://www.vinted.fr/items/${item.id}`;
+        const alertType = isPriceDrop ? 'price_drop' : 'manual';
 
         const anomalyReason = isPriceDrop
           ? `Baisse de prix détectée : passé de ${previousPrice}€ à ${item.price}€ (-${discountPercentage}% sous la cote ${matchedKeyword}).`
-          : isCertified
-          ? `Économie de ${discountPercentage}% constatée sur l'article #${item.id} (cote estimée à ${marketPrice}€).`
-          : `Compte sans historique d'avis. Prix très bas (-${discountPercentage}% sous la cote ${matchedKeyword}). Vérification requise.`;
+          : `Opportunité détectée : -${discountPercentage}% sous la cote de référence (${marketPrice}€ pour ${matchedKeyword}).`;
 
-        // Strict canonical URL
-        const canonicalUrl = `https://www.vinted.fr/items/${item.id}`;
-
-        const alertObj = {
+        detectedAnomalies.push({
           id: item.id,
           title: item.title,
           brand: item.brand,
@@ -345,22 +349,20 @@ app.all('/api/vinted/scan', async (req: Request, res: Response) => {
           previousPrice,
           marketPrice,
           discountPercentage,
-          sellerName: item.sellerName,
-          sellerRating: item.sellerRating,
-          sellerReviewsCount: item.sellerReviewsCount,
-          isCertified,
+          sellerName: 'Vendeur Vinted',
+          sellerRating: 0,
+          sellerReviewsCount: 0,
+          isCertified: false,
           alertType,
           detectedAt: new Date().toISOString(),
-          size: item.size || 'Standard',
+          size: item.size,
           imageThumbnail: '🛍️',
-          imageUrl: item.imgUrl,
+          imageUrl: item.imageUrl,
           itemUrl: canonicalUrl,
           anomalyReason,
           catalogName: activeCatalogLabel,
           catalogId: catalogId || 'default',
-        };
-
-        detectedAnomalies.push(alertObj);
+        });
         totalAnomaliesCount++;
       }
     }
@@ -373,19 +375,19 @@ app.all('/api/vinted/scan', async (req: Request, res: Response) => {
       detectedAnomalies,
       isConnected: true,
       catalogName: activeCatalogLabel,
-      catalogUrl: targetUrl,
-      statusMessage: `Scan actif : "${activeCatalogLabel}" (${realItems.length} annonces réelles)`,
+      catalogUrl: targetCatalogUrl,
+      statusMessage: `Scan actif : "${activeCatalogLabel}" (${rawItems.length} annonces réelles)`,
     });
   } catch (err: any) {
     console.error('Scan error:', err);
     res.json({
-      success: true,
-      analyzedBatchCount: 0,
+      success: false,
+      error: 'Vinted temporairement inaccessible',
+      statusMessage: 'Vinted temporairement inaccessible',
+      detectedAnomalies: [],
       totalAnalyzed: totalAnalyzedCount,
       totalAnomalies: totalAnomaliesCount,
-      detectedAnomalies: [],
       isConnected: false,
-      statusMessage: 'En attente du flux Vinted...',
     });
   }
 });
@@ -397,6 +399,15 @@ app.post('/api/discord/send-webhook', async (req: Request, res: Response) => {
   if (!webhookUrl || typeof webhookUrl !== 'string' || !webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
     res.status(400).json({ error: 'URL de Webhook Discord invalide' });
     return;
+  }
+
+  // Deduplication check: NEVER send the same item twice
+  if (alert && alert.id && !String(alert.id).startsWith('test_') && !alert.title?.includes('[TEST')) {
+    const strId = String(alert.id);
+    if (sentDiscordItemIds.has(strId)) {
+      res.json({ success: true, deduplicated: true, message: 'Article déjà envoyé sur Discord' });
+      return;
+    }
   }
 
   try {
@@ -417,7 +428,6 @@ app.post('/api/discord/send-webhook', async (req: Request, res: Response) => {
         badgeText = '🟡 Vérification manuelle';
       }
 
-      // Strict canonical URL
       const canonicalItemUrl = `https://www.vinted.fr/items/${alert.id}`;
       const catalogLabel = alert.catalogName || 'Catalogue Général';
 
@@ -494,6 +504,11 @@ app.post('/api/discord/send-webhook', async (req: Request, res: Response) => {
       const errText = await discordRes.text();
       res.status(discordRes.status).json({ error: `Discord webhook rejected: ${errText}` });
       return;
+    }
+
+    // Mark as sent in deduplication set
+    if (alert && alert.id) {
+      sentDiscordItemIds.add(String(alert.id));
     }
 
     res.json({ success: true, message: 'Embed Discord envoyé avec succès !' });
